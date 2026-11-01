@@ -1,0 +1,158 @@
+dataSource:
+  dsn: "root:123456@tcp(server.mysql:3306)/dbname?parseTime=true&charset=utf8mb4"
+  serverId: 12345
+  gtidEnabled: true
+  flavor: "mysql"
+
+es:
+  addresses:
+    - "http://server.elasticsearch:9200"
+  username: ""
+  password: ""
+  # tls:
+  #   insecureSkipVerify: false
+  #   caFile: "/path/to/ca.pem"
+  #   certFile: "/path/to/client.crt"
+  #   keyFile: "/path/to/client.key"
+  #   serverName: "server.elasticsearch"
+  version: 7
+  # refresh: "wait_for"
+
+position:
+  path: "data/position.json"
+  useGTID: true
+
+realtime:
+  heartbeatMs: 1000
+  readTimeoutMs: 2000
+  maxPending: 10000
+  queryTimeoutMs: 30000
+  esBulkTimeoutMs: 60000
+  esCircuitMaxBackoffMs: 30000
+  relatedQueryMaxPages: 1000
+  positionSaveIntervalMs: 30000
+
+bootstrap:
+  partitionSize: 5000
+  workers: 4
+  bulkSize: 1000
+  bulkFlushMs: 800
+  runBatchSize: 1000
+
+logging:
+  level: debug
+  file: "logs/app.log"
+
+debug:
+  sql: true
+  sqlParams: true
+
+server:
+  port: 8222
+  realtimePort: 8222
+
+  bootstrapPort: 8223
+
+  replayDeadLettersPort: 8224
+
+  disableForShortTasks: true
+
+syncTasks:
+  - destination: "main_table"
+
+    # tableRewrite:
+    #   - pattern: "(?i)^enterprise_[0-9]{2}$"
+    #     replace: "enterprise"
+    mapping:
+      _index: "index_name"
+      _id: "_id"
+      upsert: true
+      deleteOnDelete: true
+      deleteOnMissing: false
+
+      # mainTable: "main_table"
+
+      #   - mod: abs(key) % shards
+      # sharding:
+      #   strategy: "crc32_ieee_uint32"
+      #   shards: 64
+      #   suffixWidth: 2
+      #   vars:
+      #     enterprise_table: "enterprise"
+      #     enterprise_event_table: "enterprise_event"
+
+      sql: |
+        SELECT
+          s.AutoID as _id, s.AutoID, s.Country, s.Title, s.price, s.qty,
+          IFNULL(d.description, '') AS description,
+          IFNULL(c.remark, '') AS category_name,
+          IFNULL(
+            GROUP_CONCAT(
+              CONCAT_WS(' : ', COALESCE(i.Name,''), COALESCE(i.Value,''))
+              ORDER BY i.Name, i.Value
+              SEPARATOR ';'
+          ), '') AS attributes
+        FROM main_table s
+        LEFT JOIN desc_data d ON d.auto_id = s.AutoID
+        LEFT JOIN category c ON c.id = s.Category_id
+        LEFT JOIN attribute i ON i.AutoID = s.AutoID
+        WHERE s.AutoID IN (?)
+        GROUP BY s.AutoID
+    mappingTable:
+      main_table: ["AutoID"]
+      desc_data: ["auto_id"]
+      category: ["id"]
+      attribute: ["id"]
+    relatedQuery:
+      category:
+        sql: |
+          SELECT AutoID
+          FROM main_table
+          WHERE Category_id = :category_id
+            AND AutoID > :cursor
+        bind:
+          category_id: "id"
+        orderKey: AutoID
+        pageSize: 500
+      attribute:
+        sql: |
+          SELECT COALESCE(
+            :auto_id,
+            (
+              SELECT s.`AutoID`
+              FROM `main_table` s
+              JOIN `attribute` i ON i.`AutoID` = s.`AutoID`
+              WHERE i.`id` = :id
+              LIMIT 1
+            )
+          ) AS `AutoID`
+        bind:
+          auto_id: "AutoID"
+          id: "id"
+      desc_data:
+        sql: |
+          SELECT COALESCE(
+            :auto_id,
+            (
+              SELECT s.`AutoID`
+              FROM `main_table` s
+              JOIN `desc_data` d ON d.`auto_id` = s.`AutoID`
+              WHERE d.`auto_id` = :id
+              LIMIT 1
+            )
+          ) AS `AutoID`
+        bind:
+          auto_id: "auto_id"
+          id: "auto_id"
+    transforms:
+      splitFields:
+        - field: "attributes"
+          sep: ";"
+          trim: true
+    bulk:
+      size: 200
+      flushIntervalMs: 100
+      concurrent: 4
+    retry:
+      maxAttempts: 5
+      backoffMs: [200, 500, 1000, 2000, 5000]
